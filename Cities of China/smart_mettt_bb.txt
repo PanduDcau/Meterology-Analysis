@@ -1,0 +1,97 @@
+import os
+import xarray as xr
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.cluster import KMeans
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.model_selection import train_test_split
+
+# --- Data Loading and Processing ---
+base_path = r'./provinces_smart_met'
+city_files = [f for f in os.listdir(base_path) if f.endswith('.nc')]
+
+def compute_city_data(file_path):
+    ds = xr.open_dataset(file_path)
+
+    # Temperature (K → °C)
+    T_mean = float((ds['t2m'] - 273.15).mean().values)
+
+    # Humidity (%)
+    def calc_rh(temp_K, dew_K):
+        temp_C = temp_K - 273.15
+        dew_C = dew_K - 273.15
+        e_T = 6.112 * np.exp((17.67 * temp_C) / (temp_C + 243.5))
+        e_Td = 6.112 * np.exp((17.67 * dew_C) / (dew_C + 243.5))
+        return 100 * (e_Td / e_T)
+
+    H_mean = float(calc_rh(ds['t2m'], ds['d2m']).mean().values)
+
+    # Pressure (Pa → hPa)
+    P_mean = float((ds['sp'] / 100).mean().values)
+
+    # Wind Speed (m/s)
+    Ws_mean = float(np.sqrt(ds['u10']**2 + ds['v10']**2).mean().values)
+
+    # Precipitation (annual total in mm)
+    Pre_total = float(ds['tp'].sum().values * 1000)
+
+    return [T_mean, H_mean, P_mean, Ws_mean, Pre_total]
+
+# Load all city data
+data = {}
+for file in city_files:
+    city = file.split('_')[0]
+    try:
+        data[city] = compute_city_data(os.path.join(base_path, file))
+    except Exception as e:
+        print(f"Error processing {city}: {e}")
+
+df = pd.DataFrame.from_dict(data, orient='index',
+                             columns=['T_mean', 'H_mean', 'P_mean', 'Ws_mean', 'Pre_total'])
+
+# --- 5-Class Classification ---
+
+# Step 1: Normalize data
+scaler = StandardScaler()
+X = scaler.fit_transform(df)
+
+# Step 2: Create 5 classes using K-Means (pseudo-labeling)
+kmeans = KMeans(n_clusters=5, random_state=42, n_init='auto')
+classes = kmeans.fit_predict(X)
+df['Class'] = classes
+
+# Step 3: Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X, classes, test_size=0.3, random_state=42, stratify=classes)
+
+# Step 4: Train KNN classifier
+knn = KNeighborsClassifier(n_neighbors=5)
+knn.fit(X_train, y_train)
+
+# Step 5: Predict and evaluate
+y_pred = knn.predict(X_test)
+print("Classification Report:\n", classification_report(y_test, y_pred))
+print("Accuracy:", accuracy_score(y_test, y_pred))
+
+# --- Optional 3D Visualization ---
+fig = plt.figure(figsize=(10, 7))
+ax = fig.add_subplot(111, projection='3d')
+scatter = ax.scatter(X[:, 0], X[:, 1], X[:, 2], c=classes, cmap='viridis', s=60)
+
+# Adding labels for each city
+for i, city in enumerate(df.index):
+    ax.text(X[i, 0], X[i, 1], X[i, 2], city, size=8, color='black')
+
+# Customize the plot
+ax.set_title("City Weather Features (3D) - KMeans Clustering")
+ax.set_xlabel('Temperature')
+ax.set_ylabel('Humidity')
+ax.set_zlabel('Pressure')
+
+# Add legend for classes
+plt.legend(*scatter.legend_elements(), title="Class")
+plt.tight_layout()
+plt.show()
